@@ -1,0 +1,74 @@
+{
+  "server": {
+    "listen": "127.0.0.1:8080",
+    "token": ""
+  },
+  "providers": [
+    {
+      "name": "zen",
+      "base_url": "https://opencode.ai/zen/v1",
+      "api_key": "public",
+      "key_required": false,
+      "mimic_opencode": true,
+      "models": [
+        "big-pickle",
+        "minimax-m2.1-free",
+        "deepseek-v4-flash-free",
+        "nemotron-3-ultra-free"
+      ],
+      "default_model": "big-pickle",
+      "rps": 3
+    },
+    {
+      "name": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "models": [
+        "deepseek/deepseek-r1:free",
+        "deepseek/deepseek-chat:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "microsoft/phi-4:free",
+        "z-ai/glm-4-9b-chat:free"
+      ],
+      "default_model": "deepseek/deepseek-r1:free",
+      "rps": 10
+    },
+    {
+      "name": "groq",
+      "base_url": "https://api.groq.com/openai/v1",
+      "api_key_env": "GROQ_API_KEY",
+      "models": [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant"
+      ],
+      "default_model": "llama-3.3-70b-versatile",
+      "rps": 5
+    },
+    {
+      "name": "gemini",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "api_key_env": "GEMINI_API_KEY",
+      "models": [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite"
+      ],
+      "default_model": "gemini-2.5-flash",
+      "rps": 15
+    }
+  ],
+  "aliases": {
+    "pickle":     { "provider": "zen", "model": "big-pickle" },
+    "big-pickle": { "provider": "zen", "model": "big-pickle" },
+    "free":       { "provider": "zen", "model": "big-pickle" },
+    "zen":        { "provider": "zen", "model": "big-pickle" },
+    "r1":         { "provider": "openrouter", "model": "deepseek/deepseek-r1:free" },
+    "deepseek":   { "provider": "openrouter", "model": "deepseek/deepseek-chat:free" },
+    "llama":      { "provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct:free" },
+    "llama-g":    { "provider": "groq", "model": "llama-3.3-70b-versatile" },
+    "flash":      { "provider": "gemini", "model": "gemini-2.5-flash" },
+    "flash-lite": { "provider": "gemini", "model": "gemini-2.0-flash-lite" }
+  },
+  "default_provider": "openrouter"
+}
