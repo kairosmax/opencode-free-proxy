@@ -5,8 +5,8 @@ Proxy local en Go que expone una API compatible con OpenAI y la resuelve contra 
 ## Características
 
 - ✅ API compatible con OpenAI: `POST /v1/chat/completions` y `GET /v1/models`
-- 🆓 Provider **zen** sin API key (usa `Bearer public` + markers del cliente oficial)
-- 🔒 Provider **serve**: tunnelea a través de un `opencode serve` local (`127.0.0.1:8377`), la vía infalible que siempre pasa los chequeos del vendor
+- 🆓 Provider **zen** sin API key: `Bearer public` + headers `x-opencode-*` + la firma de system prompt que exige el gate (sin TLS falso)
+- 🔒 Provider **serve**: fallback opcional vía `opencode serve` dedicado; ya no hace falta para zen
 - 🔄 Auto-descubrimiento: sincroniza el catálogo free desde `models.dev` en cada arranque
 - 🚦 Rate-limiting por provider (token bucket) y timeouts configurables
 - 🔐 Auth opcional por token (`config.json` → `server.token`)
@@ -25,6 +25,28 @@ Proxy local en Go que expone una API compatible con OpenAI y la resuelve contra 
 
 ## Uso
 
+### Aislado del TUI (recomendado si usas `opencode` en la misma máquina)
+
+El carril `zen` directo ya funciona solo: no necesita `opencode` ni cuenta.
+`run.sh` además levanta un `opencode serve` dedicado como fallback, separado del
+TUI (el carril `serve` habla `/session` y comparte base si apunta a 8377: de ahí
+los cuelgues que veías en la sesión interactiva).
+
+```bash
+./run.sh    # opencode serve propio en 8399 (XDG_DATA_HOME aparte) + proxy en 8099
+./stop.sh   # apaga solo lo que arrancó run.sh
+```
+
+- proxy: `127.0.0.1:8099`
+- `opencode serve` dedicado (fallback): `127.0.0.1:8399`
+- almacén aislado: `~/.local/share/opencode-proxy-svc` (auth.json copiado una vez)
+- el primer arranque autollena la config: `pickle`/`free` → zen directo
+
+El autostart del proxy también aísla su `serve` (`serve.go` → `proxyDataHome`),
+así que aunque no uses `run.sh` no vuelve a pisar las sesiones del TUI.
+
+### Manual
+
 ```bash
 # compilar
 go build -o opencode-api .
@@ -35,7 +57,7 @@ go build -o opencode-api .
 # con config y listen custom
 ./opencode-api -config config.json -listen 0.0.0.0:8080
 
-# selftest: prueba la receta clonada contra zen y sale
+# selftest: prueba zen directo y el carril serve
 ./opencode-api -selftest
 ```
 
@@ -72,8 +94,8 @@ curl http://127.0.0.1:8080/v1/models
 
 Puedes usar nombres cortos en el campo `model`:
 
-- `pickle`, `big-pickle`, `free` → serve/zen con big-pickle
-- `zen` → provider zen directo
+- `pickle`, `big-pickle`, `free` → zen directo con big-pickle
+- `serve` → carril opencode local (fallback)
 - `r1` → deepseek-r1:free (openrouter)
 - `deepseek` → deepseek-chat:free
 - `llama` → llama-3.3-70b:free
@@ -97,7 +119,7 @@ main.go       → entrypoint, flags, graceful shutdown
 config.go     → config + merge de defaults + resolución de keys
 router.go     → resolución modelo→provider, token bucket rate-limit
 server.go     → HTTP server, auth, CORS, forward/SSE
-mimic.go      → fingerprint TLS tipo Bun para imitar al cliente oficial
+ids.go        → IDs con el esquema de opencode (ses_/msg_)
 zen.go        → provider zen + enrich dinámico desde models.dev
 serve.go      → lane "serve": sesión/mensaje vía opencode serve local
 selftest.go   → probe end-to-end
@@ -105,4 +127,15 @@ selftest.go   → probe end-to-end
 
 ## Nota
 
-El tier free de Zen está walled al cliente oficial de opencode. Este proxy habla su mismo dialecto (User-Agent, headers `x-opencode-*`, fingerprint TLS de Bun) para poder usarlo desde cualquier cliente OpenAI-compatible.
+El tier free de Zen está walled al cliente oficial. Lo que valida, comprobado
+contra el binario 1.18.34:
+
+1. endpoint `https://opencode.ai/inference/openai/v1` (no `/zen/v1`)
+2. `stream: true` en el body (no acepta respuestas no-stream)
+3. headers `Authorization: Bearer public`, User-Agent de opencode y `x-opencode-client/project/request/session/session-id`
+4. en el **system prompt**, dos fragmentos: `You are a title generator. You output ONLY a thread title. Nothing else.` y `- Never use tools`
+
+El TLS no lo miran: la misma petición funciona sobre TLS de Go. `shapeZenRequest`
+inyecta la firma como bloque `<metadata>` inerte (con un neutralizador después)
+y fuerza el stream; si el cliente pidió `stream:false`, `aggregateSSE` rearma la
+respuesta JSON. Así el modelo responde normal y no como generador de títulos.

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -20,8 +21,6 @@ type Server struct {
 	cfg  *Config
 	rt   *Router
 	hcli *http.Client
-	// mimicTr dials zen with the cloned opencode/Bun TLS fingerprint.
-	mimicTr *http.Transport
 	// ocSession mirrors the client session marker the official CLI sends to
 	// zen; minted once per proxy process with opencode's id scheme.
 	ocSession string
@@ -33,12 +32,6 @@ func newServer(cfg *Config) *Server {
 		rt:        newRouter(cfg),
 		hcli:      &http.Client{Timeout: 120 * time.Second},
 		ocSession: mintOpencodeID("ses"),
-		mimicTr: &http.Transport{
-			DialTLSContext:    MimicDialContext,
-			ForceAttemptHTTP2: false,
-			MaxIdleConns:      8,
-			IdleConnTimeout:   90 * time.Second,
-		},
 	}
 }
 
@@ -167,14 +160,17 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// rewrite model to the concrete upstream id
 	req["model"] = target
+	clientStream, _ := req["stream"].(bool)
+	if prov.MimicOpencode {
+		shapeZenRequest(req)
+	}
 	out, err := json.Marshal(req)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "re-encode: " + err.Error()})
 		return
 	}
 
-	stream, _ := req["stream"].(bool)
-	s.forward(w, r, prov, out, stream)
+	s.forward(w, r, prov, target, out, clientStream)
 }
 
 // handleServeChat runs the request through the local official opencode server
@@ -302,17 +298,15 @@ func asBool(v any) bool {
 	b, _ := v.(bool)
 	return b
 }
-func (s *Server) forward(w http.ResponseWriter, r *http.Request, prov *Provider, body []byte, stream bool) {
+func (s *Server) forward(w http.ResponseWriter, r *http.Request, prov *Provider, modelID string, body []byte, stream bool) {
 	url := strings.TrimSuffix(prov.BaseURL, "/") + "/chat/completions"
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	// zen requires a streamed upstream even when the caller asked for JSON;
+	// the body was reshaped above and the answer gets aggregated below.
+	needSSE := stream || prov.MimicOpencode
 	dial := s.hcli
-	if prov.MimicOpencode {
-		// zen's free tier rejects anything that doesn't speak like the Bun
-		// client down at the TLS layer, so we bypass DialTLSContext wholesale.
-		dial = &http.Client{Transport: s.mimicTr, Timeout: s.hcli.Timeout}
-	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -324,16 +318,17 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, prov *Provider,
 		req.Header.Set("Authorization", "Bearer "+prov.key)
 	}
 	req.Header.Set("Accept", "application/json")
-	if stream {
+	if needSSE {
 		req.Header.Set("Accept", "text/event-stream")
 	}
 	// zen's free tier is walled to the official client; mimic its markers.
 	if prov.MimicOpencode {
-		req.Header.Set("User-Agent", "opencode/1.18.18 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14")
+		req.Header.Set("User-Agent", "opencode/1.18.34 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14")
 		req.Header.Set("x-opencode-client", "cli")
 		req.Header.Set("x-opencode-project", "global")
 		req.Header.Set("x-opencode-request", mintOpencodeID("msg"))
 		req.Header.Set("x-opencode-session", s.ocSession)
+		req.Header.Set("x-opencode-session-id", s.ocSession)
 	}
 	for k, v := range prov.Headers {
 		req.Header.Set(k, v)
@@ -359,18 +354,160 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, prov *Provider,
 		return
 	}
 
+	if !needSSE {
+		ct := resp.Header.Get("Content-Type")
+		if ct == "" {
+			ct = "application/json"
+		}
+		w.Header().Set("Content-Type", ct)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
 	if stream {
 		relaySSE(w, resp.Body, ctx)
 		return
 	}
+	aggregateSSE(w, resp.Body, modelID)
+}
 
-	ct := resp.Header.Get("Content-Type")
-	if ct == "" {
-		ct = "application/json"
+type streamToolCall struct {
+	id, typ, name string
+	args          strings.Builder
+}
+
+// aggregateSSE collapses a streamed chat.completion.chunk sequence into one
+// chat.completion object for clients that asked for stream:false.
+func aggregateSSE(w http.ResponseWriter, body io.Reader, modelID string) {
+	br := bufio.NewReader(body)
+	var content, reasoning strings.Builder
+	finish := "stop"
+	id := ""
+	created := int64(0)
+	model := modelID
+	usage := map[string]any{}
+	calls := map[int]*streamToolCall{}
+
+	for {
+		line, err := br.ReadString('\n')
+		if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") {
+			data := strings.TrimSpace(strings.TrimPrefix(s, "data:"))
+			if data == "[DONE]" {
+				break
+			}
+			var ch struct {
+				ID      string `json:"id"`
+				Created int64  `json:"created"`
+				Model   string `json:"model"`
+				Choices []struct {
+					Delta struct {
+						Content          string `json:"content"`
+						ReasoningContent string `json:"reasoning_content"`
+						ToolCalls        []struct {
+							Index    int    `json:"index"`
+							ID       string `json:"id"`
+							Type     string `json:"type"`
+							Function struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							} `json:"function"`
+						} `json:"tool_calls"`
+					} `json:"delta"`
+					FinishReason *string `json:"finish_reason"`
+				} `json:"choices"`
+				Usage map[string]any `json:"usage"`
+			}
+			if json.Unmarshal([]byte(data), &ch) == nil {
+				if ch.ID != "" {
+					id = ch.ID
+				}
+				if ch.Created != 0 {
+					created = ch.Created
+				}
+				if ch.Model != "" {
+					model = ch.Model
+				}
+				if ch.Usage != nil {
+					usage = ch.Usage
+				}
+				for _, c := range ch.Choices {
+					content.WriteString(c.Delta.Content)
+					reasoning.WriteString(c.Delta.ReasoningContent)
+					for _, tc := range c.Delta.ToolCalls {
+						cur := calls[tc.Index]
+						if cur == nil {
+							cur = &streamToolCall{}
+							calls[tc.Index] = cur
+						}
+						if tc.ID != "" {
+							cur.id = tc.ID
+						}
+						if tc.Type != "" {
+							cur.typ = tc.Type
+						}
+						cur.name += tc.Function.Name
+						cur.args.WriteString(tc.Function.Arguments)
+					}
+					if c.FinishReason != nil && *c.FinishReason != "" {
+						finish = *c.FinishReason
+					}
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
 	}
-	w.Header().Set("Content-Type", ct)
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, resp.Body)
+
+	msg := map[string]any{"role": "assistant", "content": content.String()}
+	if reasoning.Len() > 0 {
+		msg["reasoning_content"] = reasoning.String()
+	}
+	if len(calls) > 0 {
+		idx := make([]int, 0, len(calls))
+		for i := range calls {
+			idx = append(idx, i)
+		}
+		sort.Ints(idx)
+		out := make([]any, 0, len(idx))
+		for _, i := range idx {
+			c := calls[i]
+			t := c.typ
+			if t == "" {
+				t = "function"
+			}
+			out = append(out, map[string]any{
+				"id":   c.id,
+				"type": t,
+				"function": map[string]any{
+					"name":      c.name,
+					"arguments": c.args.String(),
+				},
+			})
+		}
+		msg["tool_calls"] = out
+		if content.Len() == 0 {
+			msg["content"] = nil
+		}
+	}
+	if id == "" {
+		id = "chatcmpl-" + randHex(20)
+	}
+	if created == 0 {
+		created = unixNow()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":      id,
+		"object":  "chat.completion",
+		"created": created,
+		"model":   model,
+		"choices": []any{map[string]any{
+			"index":         0,
+			"message":       msg,
+			"finish_reason": finish,
+		}},
+		"usage": usage,
+	})
 }
 
 // relaySSE copies upstream server-sent-events to the client line by line.

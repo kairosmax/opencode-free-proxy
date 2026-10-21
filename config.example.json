@@ -6,7 +6,7 @@
   "providers": [
     {
       "name": "zen",
-      "base_url": "https://opencode.ai/zen/v1",
+      "base_url": "https://opencode.ai/inference/openai/v1",
       "api_key": "public",
       "key_required": false,
       "mimic_opencode": true,
@@ -59,16 +59,46 @@
     }
   ],
   "aliases": {
-    "pickle":     { "provider": "zen", "model": "big-pickle" },
-    "big-pickle": { "provider": "zen", "model": "big-pickle" },
-    "free":       { "provider": "zen", "model": "big-pickle" },
-    "zen":        { "provider": "zen", "model": "big-pickle" },
-    "r1":         { "provider": "openrouter", "model": "deepseek/deepseek-r1:free" },
-    "deepseek":   { "provider": "openrouter", "model": "deepseek/deepseek-chat:free" },
-    "llama":      { "provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct:free" },
-    "llama-g":    { "provider": "groq", "model": "llama-3.3-70b-versatile" },
-    "flash":      { "provider": "gemini", "model": "gemini-2.5-flash" },
-    "flash-lite": { "provider": "gemini", "model": "gemini-2.0-flash-lite" }
+    "pickle": {
+      "provider": "zen",
+      "model": "big-pickle"
+    },
+    "big-pickle": {
+      "provider": "zen",
+      "model": "big-pickle"
+    },
+    "free": {
+      "provider": "zen",
+      "model": "big-pickle"
+    },
+    "zen": {
+      "provider": "zen",
+      "model": "big-pickle"
+    },
+    "r1": {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-r1:free"
+    },
+    "deepseek": {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-chat:free"
+    },
+    "llama": {
+      "provider": "openrouter",
+      "model": "meta-llama/llama-3.3-70b-instruct:free"
+    },
+    "llama-g": {
+      "provider": "groq",
+      "model": "llama-3.3-70b-versatile"
+    },
+    "flash": {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash"
+    },
+    "flash-lite": {
+      "provider": "gemini",
+      "model": "gemini-2.0-flash-lite"
+    }
   },
   "default_provider": "openrouter"
 }

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +26,45 @@ const serveAgentDefault = "plan"
 // logFile where the autostarted serve drops its noise.
 func serveLogPath() string {
 	return os.TempDir() + "/opencode-serve.log"
+}
+
+// proxyDataHome keeps the proxy's `opencode serve` in its own XDG_DATA_HOME so
+// its sessions never land in the same store the interactive TUI is using.
+func proxyDataHome() string {
+	if v := os.Getenv("OPENCODE_PROXY_DATA_HOME"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".local", "share", "opencode-proxy-svc")
+}
+
+// seedAuth copies the existing opencode credentials into the isolated data
+// home once, so the dedicated serve keeps zen access without a fresh login.
+func seedAuth(dataHome string) {
+	if dataHome == "" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	src := filepath.Join(home, ".local", "share", "opencode", "auth.json")
+	dstDir := filepath.Join(dataHome, "opencode")
+	dst := filepath.Join(dstDir, "auth.json")
+	if _, err := os.Stat(dst); err == nil {
+		return
+	}
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(dstDir, 0700); err != nil {
+		return
+	}
+	_ = os.WriteFile(dst, raw, 0600)
 }
 
 func serveHealthURL(base string) string {
@@ -61,6 +101,11 @@ func ensureServe(p *Provider) error {
 	cmd.Stdout = lf
 	cmd.Stderr = lf
 	cmd.Dir = os.TempDir()
+	dataHome := proxyDataHome()
+	seedAuth(dataHome)
+	if dataHome != "" {
+		cmd.Env = append(os.Environ(), "XDG_DATA_HOME="+dataHome)
+	}
 	// detach into its own process group so the server outlives us
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
