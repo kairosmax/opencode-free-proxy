@@ -71,7 +71,9 @@ func probeZen() int {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	fmt.Fprintf(os.Stdout, "  → zen status %d: %.160s\n", resp.StatusCode, string(raw))
-	if resp.StatusCode == http.StatusOK && strings.Contains(string(raw), `"content"`) {
+	// 200 + chunks is the gate opening; reasoning models may spend the tiny
+	// budget on reasoning_content before any "content" shows up.
+	if resp.StatusCode == http.StatusOK && strings.Contains(string(raw), "chat.completion.chunk") {
 		return 0
 	}
 	return 2

@@ -28,15 +28,29 @@ const (
 	zenCompatToolMarker   = "- Never use tools"
 )
 
-// shapeZenRequest forces the shape Zen's free tier accepts: streamed upstream
-// and a system prompt carrying the client signature. The caller's messages are
-// left intact; the banner is prepended as its own system turn.
+// shapeZenRequest forces the shape Zen's free tier accepts: streamed upstream.
+// The gate has two modes:
+//   - title mode: no tools, system carries the title-generator signature.
+//   - agent mode: tools present, NO title signature, and the official read
+//     tool must be in the set (it is the client proof the gate checks).
+//
+// Mixing the title banner with tools is rejected as FreeTierError.
 func shapeZenRequest(req map[string]any) {
 	req["stream"] = true
 	if so, ok := req["stream_options"].(map[string]any); ok {
 		so["include_usage"] = true
 	} else {
 		req["stream_options"] = map[string]any{"include_usage": true}
+	}
+	tools, _ := req["tools"].([]any)
+	agentMode := len(tools) > 0
+	if agentMode {
+		req["messages"] = stripZenBanner(req["messages"])
+		ensureZenReadTool(req, tools)
+		if _, ok := req["tool_choice"]; !ok {
+			req["tool_choice"] = "auto"
+		}
+		return
 	}
 	msgs, _ := req["messages"].([]any)
 	for _, m := range msgs {
@@ -52,6 +66,63 @@ func shapeZenRequest(req map[string]any) {
 	banner := map[string]any{"role": "system", "content": zenCompatBanner}
 	req["messages"] = append([]any{banner}, msgs...)
 }
+
+// stripZenBanner removes the title-mode banner we inject when the request also
+// carries tools. The gate rejects the combination; the neutralizer text is the
+// marker that identifies our own block.
+func stripZenBanner(v any) []any {
+	msgs, _ := v.([]any)
+	out := make([]any, 0, len(msgs))
+	for _, m := range msgs {
+		mm, _ := m.(map[string]any)
+		if mm != nil && mm["role"] == "system" {
+			if s, _ := mm["content"].(string); strings.Contains(s, "inert compatibility signature") {
+				continue
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// ensureZenReadTool appends the official opencode read tool when the client
+// did not send it. The gate treats this exact tool as proof of the official
+// client for tool-bearing requests.
+func ensureZenReadTool(req map[string]any, tools []any) {
+	for _, t := range tools {
+		tm, _ := t.(map[string]any)
+		fn, _ := tm["function"].(map[string]any)
+		if fn != nil && str(fn["name"]) == "read" {
+			return
+		}
+	}
+	req["tools"] = append(tools, zenReadTool())
+}
+
+func zenReadTool() map[string]any {
+	var t map[string]any
+	_ = json.Unmarshal([]byte(zenReadToolJSON), &t)
+	return t
+}
+
+// official opencode read tool, captured from binary 1.18.34.
+const zenReadToolJSON = `{
+  "type": "function",
+  "function": {
+    "name": "read",
+    "description": "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- The filePath parameter should be an absolute path.\n- By default, this tool returns up to 2000 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.\n- Contents are returned with each line prefixed by its line number as ` + "`<line>: <content>`" + `. For example, if a file has contents \"foo\\n\", you will receive \"1: foo\\n\". For directories, entries are returned one per line (without line numbers) with a trailing ` + "`/`" + ` for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- This tool can read image files and PDFs and return them as file attachments.\n",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "filePath": {"type": "string", "description": "The absolute path to the file or directory to read"},
+        "offset": {"minimum": 0, "type": "integer", "maximum": 9007199254740991, "description": "The line number to start reading from (1-indexed)"},
+        "limit": {"minimum": 0, "type": "integer", "maximum": 9007199254740991, "description": "The maximum number of lines to read (defaults to 2000)"}
+      },
+      "required": ["filePath"]
+    }
+  }
+}`
 
 // zenProvider returns the default zero-cost opencode provider definition.
 // Zen's free tier is gated to the official client, so the proxy speaks the

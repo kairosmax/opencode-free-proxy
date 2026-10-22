@@ -5,7 +5,8 @@ Proxy local en Go que expone una API compatible con OpenAI y la resuelve contra 
 ## Características
 
 - ✅ API compatible con OpenAI: `POST /v1/chat/completions` y `GET /v1/models`
-- 🆓 Provider **zen** sin API key: `Bearer public` + headers `x-opencode-*` + la firma de system prompt que exige el gate (sin TLS falso)
+- 🧬 API compatible con Anthropic: `POST /v1/messages` (+ `count_tokens`) — Claude Code funciona directo
+- 🆓 Provider **zen** sin API key: `Bearer public` + headers `x-opencode-*` + la receta de dos modos que exige el gate (sin TLS falso)
 - 🔒 Provider **serve**: fallback opcional vía `opencode serve` dedicado; ya no hace falta para zen
 - 🔄 Auto-descubrimiento: sincroniza el catálogo free desde `models.dev` en cada arranque
 - 🚦 Rate-limiting por provider (token bucket) y timeouts configurables
@@ -119,23 +120,61 @@ main.go       → entrypoint, flags, graceful shutdown
 config.go     → config + merge de defaults + resolución de keys
 router.go     → resolución modelo→provider, token bucket rate-limit
 server.go     → HTTP server, auth, CORS, forward/SSE
+anthropic.go  → /v1/messages (Claude Code): traducción Anthropic↔OpenAI + SSE
 ids.go        → IDs con el esquema de opencode (ses_/msg_)
-zen.go        → provider zen + enrich dinámico desde models.dev
+zen.go        → provider zen + receta de dos modos + enrich desde models.dev
 serve.go      → lane "serve": sesión/mensaje vía opencode serve local
 selftest.go   → probe end-to-end
 ```
 
+## Claude Code
+
+El proxy expone `/v1/messages` (formato Anthropic), así que Claude Code corre
+contra cualquiera de los dos carriles sin capas extra:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8099
+export ANTHROPIC_AUTH_TOKEN=public
+export ANTHROPIC_MODEL=zen/deepseek-v4.1-flash-free          # carril zen directo
+# o:  ANTHROPIC_MODEL=serve/deepseek-v4.1-flash-free          # carril opencode serve
+export ANTHROPIC_SMALL_FAST_MODEL=zen/deepseek-v4.1-flash-free
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=zen/deepseek-v4.1-flash-free
+export ANTHROPIC_DEFAULT_SONNET_MODEL=zen/deepseek-v4.1-flash-free
+export ANTHROPIC_DEFAULT_OPUS_MODEL=zen/deepseek-v4.1-flash-free
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1
+
+claude -p "hola" --model zen/deepseek-v4.1-flash-free
+```
+
+El prefijo del modelo (`zen/…`, `serve/…`) elige el carril; cualquier modelo
+free del catálogo sirve en ambos. El bucle de herramientas (Write, Read, Bash…)
+está verificado end-to-end en los dos carriles.
+
 ## Nota
 
 El tier free de Zen está walled al cliente oficial. Lo que valida, comprobado
-contra el binario 1.18.34:
+contra el binario 1.18.34 (petición real capturada con un tap local) y probado
+en Claude Code 2.1.291:
 
-1. endpoint `https://opencode.ai/inference/openai/v1` (no `/zen/v1`)
-2. `stream: true` en el body (no acepta respuestas no-stream)
-3. headers `Authorization: Bearer public`, User-Agent de opencode y `x-opencode-client/project/request/session/session-id`
-4. en el **system prompt**, dos fragmentos: `You are a title generator. You output ONLY a thread title. Nothing else.` y `- Never use tools`
+El gate tiene **dos modos**; mezclarlos da `FreeTierError`:
 
-El TLS no lo miran: la misma petición funciona sobre TLS de Go. `shapeZenRequest`
-inyecta la firma como bloque `<metadata>` inerte (con un neutralizador después)
-y fuerza el stream; si el cliente pidió `stream:false`, `aggregateSSE` rearma la
-respuesta JSON. Así el modelo responde normal y no como generador de títulos.
+1. **Modo título** — peticiones sin tools: el system prompt debe llevar los
+   fragmentos `You are a title generator. You output ONLY a thread title.
+   Nothing else.` y `- Never use tools`. Con el neutralizador después, el
+   modelo responde normal.
+2. **Modo agente** — peticiones con tools: el banner de título **prohíbe**
+   pasar (hay que quitarlo) y el set de tools debe incluir la tool oficial
+   `read` de opencode con su schema exacto. Es la prueba de cliente que revisa
+   el gate.
+
+`shapeZenRequest` elige el modo solo: con tools quita el banner, inyecta la
+tool `read` oficial (capturada del binario) y fija `tool_choice: auto`; sin
+tools inyecta el banner de modo título. Las llamadas del modelo a la `read`
+inyectada se mapean de vuelta a la `Read` del cliente antes de responder.
+Si el cliente pidió `stream:false`, `aggregateSSE` rearma la respuesta JSON.
+
+Lo demás no lo miran: endpoint `https://opencode.ai/inference/openai/v1`,
+`stream: true` en el body, y headers `Authorization: Bearer public`,
+User-Agent de opencode y `x-opencode-client/project/request/session/session-id`.
+El TLS tampoco: la misma petición funciona sobre TLS de Go.

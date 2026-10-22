@@ -48,6 +48,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/chat/completions", s.handleChat)
+	mux.HandleFunc("/v1/messages", s.handleAnthropicMessages)
+	mux.HandleFunc("/v1/messages/count_tokens", s.handleAnthropicCountTokens)
 	return s.withCORS(s.withAuth(mux))
 }
 
