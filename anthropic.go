@@ -472,17 +472,17 @@ func relayAnthropicStream(w http.ResponseWriter, body io.ReadCloser, model strin
 		if id == "" {
 			id = mintOpencodeID("toolu")
 		}
-		st.startBlock(map[string]any{"type": "tool_use", "id": id, "name": clientToolName(c.name), "input": map[string]any{}})
+		blockIdx := st.startBlock(map[string]any{"type": "tool_use", "id": id, "name": clientToolName(c.name), "input": map[string]any{}})
 		args := c.args.String()
 		if args == "" {
 			args = "{}"
 		}
 		st.send("content_block_delta", map[string]any{
 			"type":  "content_block_delta",
-			"index": st.blocks - 1,
+			"index": blockIdx,
 			"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
 		})
-		st.send("content_block_stop", map[string]any{"type": "content_block_stop", "index": st.blocks - 1})
+		st.send("content_block_stop", map[string]any{"type": "content_block_stop", "index": blockIdx})
 	}
 	reason := anthropicStopReason(st.finish, len(st.calls) > 0)
 	outTokens := estimateOutputTokens(st)
@@ -531,8 +531,7 @@ func (st *anthropicStreamer) consume(data []byte) {
 	for _, c := range ch.Choices {
 		if c.Delta.Content != "" {
 			if !st.textOpen {
-				st.textIdx = st.blocks
-				st.startBlock(map[string]any{"type": "text", "text": ""})
+				st.textIdx = st.startBlock(map[string]any{"type": "text", "text": ""})
 				st.textOpen = true
 			}
 			st.send("content_block_delta", map[string]any{
@@ -563,18 +562,23 @@ func (st *anthropicStreamer) consume(data []byte) {
 	}
 }
 
-func (st *anthropicStreamer) startBlock(block map[string]any) {
+// startBlock emite el content_block_start y devuelve el índice asignado,
+// avanzando el contador para que el llamador use el mismo índice en los
+// deltas y en el stop.
+func (st *anthropicStreamer) startBlock(block map[string]any) int {
+	idx := st.blocks
 	st.send("content_block_start", map[string]any{
 		"type":          "content_block_start",
-		"index":         st.blocks,
+		"index":         idx,
 		"content_block": block,
 	})
+	st.blocks++
+	return idx
 }
 
 func (st *anthropicStreamer) closeText() {
 	if st.textOpen {
 		st.send("content_block_stop", map[string]any{"type": "content_block_stop", "index": st.textIdx})
-		st.blocks++
 		st.textOpen = false
 	}
 }
