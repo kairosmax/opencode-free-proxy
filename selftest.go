@@ -93,7 +93,7 @@ func probeServeLane(cfg *Config) error {
 			return err
 		}
 		defer serveKillSession(ctx, p, sid)
-		txt, _, err := serveChat(ctx, p, sid, "big-pickle", "Reply exactly: serve-ok")
+		txt, _, _, err := serveChat(ctx, p, sid, "big-pickle", "Reply exactly: serve-ok")
 		if err != nil {
 			return err
 		}

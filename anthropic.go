@@ -789,7 +789,7 @@ func (s *Server) handleAnthropicServe(w http.ResponseWriter, r *http.Request, pr
 
 	prompt := anthropicFlatten(req)
 	t0 := time.Now()
-	text, usage, err := serveChat(r.Context(), prov, sid, target, prompt)
+	text, reasoning, usage, err := serveChat(r.Context(), prov, sid, target, prompt)
 	if debugOn() {
 		fmt.Fprintf(os.Stderr, "serve chat model=%s prompt=%d dur=%s err=%v\n", target, len(prompt), time.Since(t0), err)
 	}
@@ -805,12 +805,17 @@ func (s *Server) handleAnthropicServe(w http.ResponseWriter, r *http.Request, pr
 		outTok = len(text) / 4
 	}
 	if !clientStream {
+		content := []any{}
+		if reasoning != "" && thinkingEnabled() && thinkingRequested(req) {
+			content = append(content, map[string]any{"type": "thinking", "thinking": reasoning, "signature": ""})
+		}
+		content = append(content, map[string]any{"type": "text", "text": text})
 		writeJSON(w, http.StatusOK, map[string]any{
 			"id":            mintOpencodeID("msg"),
 			"type":          "message",
 			"role":          "assistant",
 			"model":         clientModel,
-			"content":       []any{map[string]any{"type": "text", "text": text}},
+			"content":       content,
 			"stop_reason":   "end_turn",
 			"stop_sequence": nil,
 			"usage":         map[string]any{"input_tokens": inTok, "output_tokens": outTok},
@@ -843,15 +848,33 @@ func (s *Server) handleAnthropicServe(w http.ResponseWriter, r *http.Request, pr
 			"usage":         map[string]any{"input_tokens": inTok, "output_tokens": 1},
 		},
 	})
+	emitServeThink := reasoning != "" && thinkingEnabled() && thinkingRequested(req)
+	idx := 0
+	if emitServeThink {
+		send("content_block_start", map[string]any{
+			"type": "content_block_start", "index": 0,
+			"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
+		})
+		send("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": 0,
+			"delta": map[string]any{"type": "thinking_delta", "thinking": reasoning},
+		})
+		send("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": 0,
+			"delta": map[string]any{"type": "signature_delta", "signature": ""},
+		})
+		send("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
+		idx = 1
+	}
 	send("content_block_start", map[string]any{
-		"type": "content_block_start", "index": 0,
+		"type": "content_block_start", "index": idx,
 		"content_block": map[string]any{"type": "text", "text": ""},
 	})
 	send("content_block_delta", map[string]any{
-		"type": "content_block_delta", "index": 0,
+		"type": "content_block_delta", "index": idx,
 		"delta": map[string]any{"type": "text_delta", "text": text},
 	})
-	send("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
+	send("content_block_stop", map[string]any{"type": "content_block_stop", "index": idx})
 	send("message_delta", map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},

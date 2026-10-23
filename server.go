@@ -197,12 +197,12 @@ func (s *Server) handleServeChat(w http.ResponseWriter, r *http.Request, prov *P
 	defer serveKillSession(r.Context(), prov, sid)
 
 	prompt := buildPromptText(req["messages"])
-	text, usage, err := serveChat(r.Context(), prov, sid, modelID, prompt)
+	text, reasoning, usage, err := serveChat(r.Context(), prov, sid, modelID, prompt)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}
-	s.answerOpenAI(w, r, modelID, text, usage, asBool(req["stream"]))
+	s.answerOpenAI(w, r, modelID, text, reasoning, usage, asBool(req["stream"]))
 }
 
 // buildPromptText flattens an OpenAI messages array into a single text part.
@@ -251,7 +251,19 @@ func contentText(v any) string {
 
 // answerOpenAI writes the OpenAI chat.completion response; streams it as a
 // single SSE chunk when the caller asked for SSE.
-func (s *Server) answerOpenAI(w http.ResponseWriter, r *http.Request, modelID, text string, usage map[string]int, stream bool) {
+func (s *Server) answerOpenAI(w http.ResponseWriter, r *http.Request, modelID, text, reasoning string, usage map[string]int, stream bool) {
+	msg := map[string]any{"role": "assistant", "content": text}
+	if reasoning != "" {
+		msg["reasoning_content"] = reasoning
+	}
+	u := map[string]any{
+		"prompt_tokens":     usage["prompt_tokens"],
+		"completion_tokens": usage["completion_tokens"],
+		"total_tokens":      usage["total_tokens"],
+	}
+	if rt, ok := usage["reasoning_tokens"]; ok && rt > 0 {
+		u["completion_tokens_details"] = map[string]any{"reasoning_tokens": rt}
+	}
 	if !stream {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"id":      "chatcmpl-" + mintOpencodeID("re")[3:20],
@@ -260,14 +272,10 @@ func (s *Server) answerOpenAI(w http.ResponseWriter, r *http.Request, modelID, t
 			"model":   modelID,
 			"choices": []any{map[string]any{
 				"index":         0,
-				"message":       map[string]any{"role": "assistant", "content": text},
+				"message":       msg,
 				"finish_reason": "stop",
 			}},
-			"usage": map[string]any{
-				"prompt_tokens":     usage["prompt_tokens"],
-				"completion_tokens": usage["completion_tokens"],
-				"total_tokens":      usage["total_tokens"],
-			},
+			"usage": u,
 		})
 		return
 	}
@@ -275,6 +283,11 @@ func (s *Server) answerOpenAI(w http.ResponseWriter, r *http.Request, modelID, t
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
+	delta := map[string]any{"role": "assistant"}
+	if reasoning != "" {
+		delta["reasoning_content"] = reasoning
+	}
+	delta["content"] = text
 	chunk := map[string]any{
 		"id":      "chatcmpl-" + mintOpencodeID("re")[3:20],
 		"object":  "chat.completion.chunk",
@@ -282,9 +295,10 @@ func (s *Server) answerOpenAI(w http.ResponseWriter, r *http.Request, modelID, t
 		"model":   modelID,
 		"choices": []any{map[string]any{
 			"index":         0,
-			"delta":         map[string]any{"role": "assistant", "content": text},
+			"delta":         delta,
 			"finish_reason": "stop",
 		}},
+		"usage": u,
 	}
 	b, _ := json.Marshal(chunk)
 	fmt.Fprintf(w, "data: %s\n\n", b)

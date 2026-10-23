@@ -168,7 +168,9 @@ type serveMsgOut struct {
 
 // serveChat runs one chat turn over the local opencode server.
 // Usage for LO: "give me a text part and I return what the assistant said".
-func serveChat(ctx context.Context, p *Provider, sid string, modelID, text string) (string, map[string]int, error) {
+// The reasoning part (when the model emits one) is returned separately so
+// callers can surface it as Anthropic thinking blocks.
+func serveChat(ctx context.Context, p *Provider, sid string, modelID, text string) (string, string, map[string]int, error) {
 	payload := map[string]any{
 		"model": map[string]string{"providerID": "opencode", "modelID": modelID},
 		"agent": serveAgent(p, serveAgentDefault),
@@ -178,34 +180,38 @@ func serveChat(ctx context.Context, p *Provider, sid string, modelID, text strin
 	ep := strings.TrimSuffix(p.BaseURL, "/") + "/session/" + sid + "/message"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep, bytes.NewReader(body))
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := serveClient().Do(req)
 	if err != nil {
-		return "", nil, fmt.Errorf("serve upstream: %w", err)
+		return "", "", nil, fmt.Errorf("serve upstream: %w", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return "", nil, fmt.Errorf("serve upstream %d: %s", resp.StatusCode, truncate(string(raw), 400))
+		return "", "", nil, fmt.Errorf("serve upstream %d: %s", resp.StatusCode, truncate(string(raw), 400))
 	}
 	var out serveMsgOut
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", nil, fmt.Errorf("decode serve reply: %w", err)
+		return "", "", nil, fmt.Errorf("decode serve reply: %w", err)
 	}
-	var sb strings.Builder
+	var sb, rb strings.Builder
 	for _, part := range out.Parts {
-		if part.Type == "text" {
+		switch part.Type {
+		case "text":
 			sb.WriteString(part.Text)
+		case "reasoning":
+			rb.WriteString(part.Text)
 		}
 	}
 	usage := map[string]int{
 		"prompt_tokens":     out.Info.Tokens.Input,
 		"completion_tokens": out.Info.Tokens.Output,
 		"total_tokens":      out.Info.Tokens.Total,
+		"reasoning_tokens":  out.Info.Tokens.Reasoning,
 	}
-	return sb.String(), usage, nil
+	return sb.String(), rb.String(), usage, nil
 }
 
 func serveAgent(p *Provider, def string) string {
