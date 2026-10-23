@@ -90,6 +90,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	clientStream, _ := req["stream"].(bool)
+	emitThink := thinkingEnabled() && thinkingRequested(req)
 	resp, err := s.anthropicUpstream(r.Context(), prov, out, clientStream)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "upstream: "+err.Error())
@@ -107,10 +108,10 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 
 	estIn := anthropicEstimateTokens(body)
 	if clientStream {
-		relayAnthropicStream(w, resp.Body, model, estIn)
+		relayAnthropicStream(w, resp.Body, model, estIn, emitThink)
 		return
 	}
-	writeAnthropicAggregate(w, resp.Body, model, estIn)
+	writeAnthropicAggregate(w, resp.Body, model, estIn, emitThink)
 }
 
 func (s *Server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
@@ -408,19 +409,22 @@ type oaiToolCall struct {
 }
 
 type anthropicStreamer struct {
-	w        http.ResponseWriter
-	fl       http.Flusher
-	model    string
-	blocks   int
-	textIdx  int
-	textOpen bool
-	calls    map[int]*oaiToolCall
-	order    []int
-	finish   string
-	usage    map[string]any
+	w         http.ResponseWriter
+	fl        http.Flusher
+	model     string
+	blocks    int
+	textIdx   int
+	textOpen  bool
+	thinkIdx  int
+	thinkOpen bool
+	emitThink bool
+	calls     map[int]*oaiToolCall
+	order     []int
+	finish    string
+	usage     map[string]any
 }
 
-func relayAnthropicStream(w http.ResponseWriter, body io.ReadCloser, model string, estIn int) {
+func relayAnthropicStream(w http.ResponseWriter, body io.ReadCloser, model string, estIn int, emitThink bool) {
 	fl, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -428,11 +432,13 @@ func relayAnthropicStream(w http.ResponseWriter, body io.ReadCloser, model strin
 	w.WriteHeader(http.StatusOK)
 
 	st := &anthropicStreamer{
-		w:       w,
-		fl:      fl,
-		model:   model,
-		textIdx: -1,
-		calls:   map[int]*oaiToolCall{},
+		w:         w,
+		fl:        fl,
+		model:     model,
+		textIdx:   -1,
+		thinkIdx:  -1,
+		emitThink: emitThink,
+		calls:     map[int]*oaiToolCall{},
 	}
 	st.send("message_start", map[string]any{
 		"type": "message_start",
@@ -462,6 +468,7 @@ func relayAnthropicStream(w http.ResponseWriter, body io.ReadCloser, model strin
 			break
 		}
 	}
+	st.closeThinking()
 	st.closeText()
 	for _, idx := range st.order {
 		c := st.calls[idx]
@@ -529,7 +536,19 @@ func (st *anthropicStreamer) consume(data []byte) {
 		st.usage = ch.Usage
 	}
 	for _, c := range ch.Choices {
+		if r := c.Delta.ReasoningContent; r != "" && st.emitThink && st.canOpenThinking() {
+			if !st.thinkOpen {
+				st.thinkIdx = st.startBlock(map[string]any{"type": "thinking", "thinking": "", "signature": ""})
+				st.thinkOpen = true
+			}
+			st.send("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": st.thinkIdx,
+				"delta": map[string]any{"type": "thinking_delta", "thinking": r},
+			})
+		}
 		if c.Delta.Content != "" {
+			st.closeThinking()
 			if !st.textOpen {
 				st.textIdx = st.startBlock(map[string]any{"type": "text", "text": ""})
 				st.textOpen = true
@@ -576,6 +595,30 @@ func (st *anthropicStreamer) startBlock(block map[string]any) int {
 	return idx
 }
 
+// canOpenThinking reports whether a thinking block may still be opened: once
+// text or tool blocks have been emitted the block order is already fixed.
+func (st *anthropicStreamer) canOpenThinking() bool {
+	return !st.textOpen
+}
+
+// closeThinking emits the signature and stop for an open thinking block.
+// Upstream reasoning arrives as OpenAI `reasoning_content`, which carries no
+// signature, so we send an empty one. That is fine on this path: the proxy is
+// the client's upstream, and anthropicToOpenAI drops thinking blocks when the
+// history is translated back, so an unsigned block is never replayed to a real
+// Anthropic API (which would reject it with a 400).
+func (st *anthropicStreamer) closeThinking() {
+	if st.thinkOpen {
+		st.send("content_block_delta", map[string]any{
+			"type":  "content_block_delta",
+			"index": st.thinkIdx,
+			"delta": map[string]any{"type": "signature_delta", "signature": ""},
+		})
+		st.send("content_block_stop", map[string]any{"type": "content_block_stop", "index": st.thinkIdx})
+		st.thinkOpen = false
+	}
+}
+
 func (st *anthropicStreamer) closeText() {
 	if st.textOpen {
 		st.send("content_block_stop", map[string]any{"type": "content_block_stop", "index": st.textIdx})
@@ -592,8 +635,9 @@ func estimateOutputTokens(st *anthropicStreamer) int {
 	return 1
 }
 
-func writeAnthropicAggregate(w http.ResponseWriter, body io.ReadCloser, model string, estIn int) {
+func writeAnthropicAggregate(w http.ResponseWriter, body io.ReadCloser, model string, estIn int, emitThink bool) {
 	var content strings.Builder
+	var reasoning strings.Builder
 	calls := map[int]*oaiToolCall{}
 	order := []int{}
 	finish := ""
@@ -609,8 +653,9 @@ func writeAnthropicAggregate(w http.ResponseWriter, body io.ReadCloser, model st
 			var ch struct {
 				Choices []struct {
 					Delta struct {
-						Content   string `json:"content"`
-						ToolCalls []struct {
+						Content          string `json:"content"`
+						ReasoningContent string `json:"reasoning_content"`
+						ToolCalls        []struct {
 							Index    int    `json:"index"`
 							ID       string `json:"id"`
 							Type     string `json:"type"`
@@ -630,6 +675,7 @@ func writeAnthropicAggregate(w http.ResponseWriter, body io.ReadCloser, model st
 				}
 				for _, c := range ch.Choices {
 					content.WriteString(c.Delta.Content)
+					reasoning.WriteString(c.Delta.ReasoningContent)
 					for _, tc := range c.Delta.ToolCalls {
 						cur := calls[tc.Index]
 						if cur == nil {
@@ -655,6 +701,9 @@ func writeAnthropicAggregate(w http.ResponseWriter, body io.ReadCloser, model st
 	}
 	sort.Ints(order)
 	blocks := []any{}
+	if reasoning.Len() > 0 && emitThink {
+		blocks = append(blocks, map[string]any{"type": "thinking", "thinking": reasoning.String(), "signature": ""})
+	}
 	if content.Len() > 0 {
 		blocks = append(blocks, map[string]any{"type": "text", "text": content.String()})
 	}
@@ -858,6 +907,33 @@ func str(v any) string {
 	return s
 }
 
+// thinkingRequested reports whether the client asked for reasoning output.
+// Claude Code sends {"thinking":{"type":"adaptive","display":...}} or the
+// legacy {"type":"enabled","budget_tokens":N}; anything else (including an
+// absent field) keeps the response text-only.
+func thinkingRequested(req map[string]any) bool {
+	v, ok := req["thinking"]
+	if !ok || v == nil {
+		return false
+	}
+	t, _ := v.(map[string]any)
+	switch str(t["type"]) {
+	case "disabled", "":
+		return false
+	case "adaptive", "enabled":
+		return true
+	}
+	return false
+}
+
 func debugOn() bool { return os.Getenv("OPENCODE_PROXY_DEBUG") != "" }
+
+// thinkingEnabled reports whether upstream reasoning_content should be
+// re-emitted as Anthropic `thinking` blocks. On by default; set
+// OPENCODE_PROXY_THINKING=off to drop it and keep the old shape.
+func thinkingEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("OPENCODE_PROXY_THINKING")))
+	return v != "off" && v != "0" && v != "false"
+}
 
 var anthSeq atomic.Uint64
