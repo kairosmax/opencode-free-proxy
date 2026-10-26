@@ -31,7 +31,7 @@ func newServer(cfg *Config) *Server {
 		cfg:       cfg,
 		rt:        newRouter(cfg),
 		hcli:      &http.Client{Timeout: 120 * time.Second},
-		ocSession: mintOpencodeID("ses"),
+		ocSession: mintOpencodeSessionID(),
 	}
 }
 
@@ -323,6 +323,9 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, prov *Provider,
 	// the body was reshaped above and the answer gets aggregated below.
 	needSSE := stream || prov.MimicOpencode
 	dial := s.hcli
+	if prov.MimicOpencode {
+		dial = zenHTTPClient(0)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -339,7 +342,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, prov *Provider,
 	}
 	// zen's free tier is walled to the official client; mimic its markers.
 	if prov.MimicOpencode {
-		req.Header.Set("User-Agent", "opencode/1.18.34 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14")
+		req.Header.Set("User-Agent", "opencode/1.18.10 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14")
 		req.Header.Set("x-opencode-client", "cli")
 		req.Header.Set("x-opencode-project", "global")
 		req.Header.Set("x-opencode-request", mintOpencodeID("msg"))

@@ -47,7 +47,7 @@ func probeZen() int {
 		},
 	}
 	body, _ := json.Marshal(payload)
-	cl := &http.Client{Timeout: 60 * time.Second}
+	cl := zenHTTPClient(60 * time.Second)
 	req, err := http.NewRequest(http.MethodPost, zenBase+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		fmt.Println("selftest: build request:", err)
@@ -56,11 +56,11 @@ func probeZen() int {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer public")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("User-Agent", "opencode/1.18.34 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14")
+	req.Header.Set("User-Agent", "opencode/1.18.10 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14")
 	req.Header.Set("x-opencode-client", "cli")
 	req.Header.Set("x-opencode-project", "global")
 	req.Header.Set("x-opencode-request", mintOpencodeID("msg"))
-	req.Header.Set("x-opencode-session", mintOpencodeID("ses"))
+	req.Header.Set("x-opencode-session", mintOpencodeSessionID())
 	req.Header.Set("x-opencode-session-id", req.Header.Get("x-opencode-session"))
 
 	resp, err := cl.Do(req)

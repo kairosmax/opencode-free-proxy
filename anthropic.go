@@ -137,7 +137,7 @@ func (s *Server) anthropicUpstream(ctx context.Context, prov *Provider, body []b
 		req.Header.Set("Authorization", "Bearer "+prov.Key())
 	}
 	if prov.MimicOpencode {
-		req.Header.Set("User-Agent", "opencode/1.18.34 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14")
+		req.Header.Set("User-Agent", "opencode/1.18.10 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14")
 		req.Header.Set("x-opencode-client", "cli")
 		req.Header.Set("x-opencode-project", "global")
 		req.Header.Set("x-opencode-request", mintOpencodeID("msg"))
@@ -147,11 +147,17 @@ func (s *Server) anthropicUpstream(ctx context.Context, prov *Provider, body []b
 	for k, v := range prov.Headers {
 		req.Header.Set(k, v)
 	}
-	cl := s.hcli
+	tr := s.hcli.Transport
+	if prov.MimicOpencode {
+		tr = zenTransport
+	}
+	cl := &http.Client{Transport: tr}
 	if stream {
-		cl = &http.Client{Transport: s.hcli.Transport}
+		cl = &http.Client{Transport: tr}
 	} else if prov.TimeoutMs > 0 {
-		cl = &http.Client{Transport: s.hcli.Transport, Timeout: time.Duration(prov.TimeoutMs) * time.Millisecond}
+		cl = &http.Client{Transport: tr, Timeout: time.Duration(prov.TimeoutMs) * time.Millisecond}
+	} else {
+		cl.Timeout = s.hcli.Timeout
 	}
 	return cl.Do(req)
 }

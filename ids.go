@@ -11,10 +11,19 @@ const idAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 // mintOpencodeID reproduces opencode's Identifier.create ascending scheme:
 // prefix + "_" + hex(6 low bytes of ts<<12|counter) + 14 base62 chars.
 func mintOpencodeID(prefix string) string {
-	now := (uint64(time.Now().UnixMilli()) << 12) | 1
+	return encodeOpencodeID(prefix, (uint64(time.Now().UnixMilli())<<12)|1)
+}
+
+// mintOpencodeSessionID mints the descending variant the CLI uses for ses_*:
+// the 48-bit id is the complement of the ascending timestamp.
+func mintOpencodeSessionID() string {
+	return encodeOpencodeID("ses", ^((uint64(time.Now().UnixMilli()) << 12) | 1))
+}
+
+func encodeOpencodeID(prefix string, id uint64) string {
 	var tb [6]byte
 	for i := 0; i < 6; i++ {
-		tb[i] = byte(now >> (40 - 8*i))
+		tb[i] = byte(id >> (40 - 8*i))
 	}
 	return fmt.Sprintf("%s_%s%s", prefix, fmt.Sprintf("%x", tb[:]), randomBase62(14))
 }
