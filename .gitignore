@@ -3,3 +3,5 @@ config.json
 opencode-proxy
 .run.pid
 .serve.pid
+instrucciones.md
+config.json.bak-*

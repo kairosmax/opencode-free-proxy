@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -17,8 +18,10 @@ type Config struct {
 
 // ServerConfig controls the HTTP listener.
 type ServerConfig struct {
-	Listen string `json:"listen"`
-	Token  string `json:"token"`
+	Listen           string `json:"listen"`
+	Token            string `json:"token"`
+	Instructions     string `json:"instructions"`
+	InstructionsFile string `json:"instructions_file"`
 }
 
 // Provider is a single upstream chat-completions backend.
@@ -145,7 +148,27 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Default == "" && len(cfg.Providers) > 0 {
 		cfg.Default = cfg.Providers[0].Name
 	}
+	cfg.Server.Instructions = resolveInstructions(path, cfg.Server.Instructions, cfg.Server.InstructionsFile)
 	return cfg, nil
+}
+
+func resolveInstructions(cfgPath, inline, file string) string {
+	parts := []string{}
+	if strings.TrimSpace(inline) != "" {
+		parts = append(parts, strings.TrimSpace(inline))
+	}
+	if strings.TrimSpace(file) != "" {
+		p := file
+		if !filepath.IsAbs(p) && cfgPath != "" {
+			p = filepath.Join(filepath.Dir(cfgPath), p)
+		}
+		if raw, err := os.ReadFile(p); err == nil {
+			if s := strings.TrimSpace(string(raw)); s != "" {
+				parts = append(parts, s)
+			}
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // MergeConfigs overlays user fields on top of default ones so partial configs
@@ -156,6 +179,12 @@ func MergeConfigs(base, over *Config) *Config {
 	}
 	if over.Server.Token != "" {
 		base.Server.Token = over.Server.Token
+	}
+	if over.Server.Instructions != "" {
+		base.Server.Instructions = over.Server.Instructions
+	}
+	if over.Server.InstructionsFile != "" {
+		base.Server.InstructionsFile = over.Server.InstructionsFile
 	}
 	if len(over.Providers) > 0 {
 		base.Providers = over.Providers

@@ -83,6 +83,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			}
 		}
 	}
+	applyInstructions(oai, s.instructionsFor(r))
 	out, err := json.Marshal(oai)
 	if err != nil {
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "re-encode: "+err.Error())

@@ -166,6 +166,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if prov.MimicOpencode {
 		shapeZenRequest(req)
 	}
+	applyInstructions(req, s.instructionsFor(r))
 	out, err := json.Marshal(req)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "re-encode: " + err.Error()})

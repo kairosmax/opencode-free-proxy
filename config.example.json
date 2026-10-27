@@ -1,7 +1,9 @@
 {
   "server": {
     "listen": "127.0.0.1:8080",
-    "token": ""
+    "token": "",
+    "instructions": "",
+    "instructions_file": ""
   },
   "providers": [
     {
